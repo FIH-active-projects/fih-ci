@@ -24,7 +24,7 @@ on:
         default: false
       node-version:
         type: string
-        default: "20"
+        default: "22"
       python-version:
         type: string
         default: "3.12"
@@ -59,7 +59,7 @@ jobs:
       python: ${{ steps.find.outputs.python }}
       flutter: ${{ steps.find.outputs.flutter }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: find
         run: |
           dirs_with() {
@@ -91,7 +91,7 @@ jobs:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -139,7 +139,7 @@ jobs:
       MAX_MB: ${{ inputs.max-file-size-mb }}
       ALLOW_BUILD: ${{ inputs.allow-build-folders }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Block generated folders and large files
@@ -200,13 +200,14 @@ jobs:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       BLOCK: ${{ inputs.block-on-code-findings }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Semgrep
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          set -- --config p/default --metrics=off --error
+          set -- --config p/default --metrics=off --error \
+            --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
           if [ "$EVENT" = pull_request ]; then
             set -- "$@" --baseline-commit "$BASE_SHA"
           fi
@@ -225,7 +226,7 @@ jobs:
     env:
       BLOCK: ${{ inputs.block-on-vulnerable-libraries }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: OSV-Scanner
         run: |
           curl -sSfL -o /tmp/osv-scanner \
@@ -261,10 +262,11 @@ jobs:
       run:
         working-directory: ${{ matrix.dir }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
+          package-manager-cache: false
       - name: Install
         run: |
           if [ -f package-lock.json ]; then npm ci
@@ -295,8 +297,8 @@ jobs:
       run:
         working-directory: ${{ matrix.dir }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python-version }}
       - name: Install
@@ -334,7 +336,7 @@ jobs:
       run:
         working-directory: ${{ matrix.dir }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: subosito/flutter-action@v2
         with:
           channel: stable

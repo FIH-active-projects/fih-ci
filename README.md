@@ -88,7 +88,7 @@ jobs:
       block-on-code-findings: false         # default true
       max-file-size-mb: 25                  # default 10
       allow-build-folders: true             # default false; for projects that commit their built site
-      node-version: "18"                    # default "20"
+      node-version: "20"                    # default "22"
       python-version: "3.11"                # default "3.12"
       flutter-version: "3.22.0"             # default: latest stable
 ```
