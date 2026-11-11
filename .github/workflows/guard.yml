@@ -1,0 +1,50 @@
+# FIH guard: flags pull requests from forks that change anything under .github/.
+#
+# Projects call it from a pull_request_target workflow (see README.md). GitHub runs that workflow
+# from the project's own main branch, so a pull request can't change or switch off this check,
+# and it runs before a maintainer clicks "Approve workflows to run". It only reads the list of
+# changed files through the API and never runs the pull request's code.
+
+name: FIH guard
+
+on:
+  workflow_call:
+
+permissions:
+  pull-requests: read
+
+jobs:
+  protected:
+    name: Protected files
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+    steps:
+      - name: Check for changes to .github/
+        run: |
+          if [ -z "$PR" ]; then
+            echo "::error::Call this workflow from a pull_request_target workflow."
+            exit 1
+          fi
+          changed=$(gh api --paginate "repos/$REPO/pulls/$PR/files" \
+                      --jq '.[] | .filename, (.previous_filename // empty)' \
+                    | grep -E '^\.github/' | sort -u || true)
+          if [ -z "$changed" ]; then
+            echo "No changes under .github/."
+            exit 0
+          fi
+          echo "This pull request changes:"
+          echo "$changed"
+          # Only people with write access can push branches to the project itself, so a branch
+          # in this repo comes from an FIH maintainer or Dependabot, not from a student's fork.
+          if [ "$HEAD_REPO" = "$REPO" ]; then
+            echo "::notice::The pull request comes from a branch in this repo, so a maintainer made it."
+            exit 0
+          fi
+          while IFS= read -r path; do
+            echo "::error file=$path::This pull request from a fork changes '$path'. Files under .github/ control the checks and the review rules. A maintainer must read this change before clicking 'Approve workflows to run', and this check stays red until the change is removed."
+          done <<< "$changed"
+          exit 1
