@@ -250,7 +250,7 @@ jobs:
           esac
 
   node:
-    name: Node.js build and tests (${{ matrix.dir }})
+    name: Node.js build and tests
     needs: detect
     if: needs.detect.outputs.node != '[]'
     runs-on: ubuntu-latest
@@ -285,7 +285,7 @@ jobs:
           fi
 
   python:
-    name: Python build and tests (${{ matrix.dir }})
+    name: Python build and tests
     needs: detect
     if: needs.detect.outputs.python != '[]'
     runs-on: ubuntu-latest
@@ -324,7 +324,7 @@ jobs:
           exit "$code"
 
   flutter:
-    name: Flutter build and tests (${{ matrix.dir }})
+    name: Flutter build and tests
     needs: detect
     if: needs.detect.outputs.flutter != '[]'
     runs-on: ubuntu-latest
