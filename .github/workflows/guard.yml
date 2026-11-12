@@ -1,17 +1,18 @@
-# FIH guard: flags pull requests from forks that change anything under .github/.
+# FIH guard: flags pull requests from forks that change anything under .github/, and welcomes
+# students with a comment that explains what happens next.
 #
 # Projects call it from a pull_request_target workflow (see README.md). GitHub runs that workflow
 # from the project's own main branch, so a pull request can't change or switch off this check,
-# and it runs before a maintainer clicks "Approve workflows to run". It only reads the list of
-# changed files through the API and never runs the pull request's code.
+# and it runs before a maintainer clicks "Approve workflows to run". It only reads the pull
+# request through the API and never runs the pull request's code.
+#
+# The comment needs "pull-requests: write" in the calling workflow. Without it, the comment is
+# skipped and the check still works.
 
 name: FIH guard
 
 on:
   workflow_call:
-
-permissions:
-  pull-requests: read
 
 jobs:
   protected:
@@ -20,24 +21,71 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
+      OWNER: ${{ github.repository_owner }}
       PR: ${{ github.event.pull_request.number }}
+      AUTHOR: ${{ github.event.pull_request.user.login }}
       HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      HEAD_DEFAULT: ${{ github.event.pull_request.head.repo.default_branch }}
     steps:
-      - name: Check for changes to .github/
+      - name: List changes to .github/
         run: |
           if [ -z "$PR" ]; then
             echo "::error::Call this workflow from a pull_request_target workflow."
             exit 1
           fi
-          changed=$(gh api --paginate "repos/$REPO/pulls/$PR/files" \
-                      --jq '.[] | .filename, (.previous_filename // empty)' \
-                    | grep -E '^\.github/' | sort -u || true)
-          if [ -z "$changed" ]; then
+          gh api --paginate "repos/$REPO/pulls/$PR/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)' \
+            | { grep -E '^\.github/' || true; } | sort -u > "$RUNNER_TEMP/changed.txt"
+
+      - name: Comment for the student
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        continue-on-error: true
+        run: |
+          comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+                       --jq '.[] | select(.user.login == "github-actions[bot]") | .body')
+          protected_note=""
+          if [ -s "$RUNNER_TEMP/changed.txt" ] && ! grep -q '<!-- fih-protected -->' <<< "$comments"; then
+            protected_note="<!-- fih-protected -->
+          ⚠️ This pull request changes files in \`.github/\` (the project's checks and settings). Students can't change these, so the **Protected files** check stays red. Remove that change from your branch, or open an issue explaining why it's needed."
+          fi
+
+          if ! grep -q '<!-- fih-welcome -->' <<< "$comments"; then
+            body="<!-- fih-welcome -->
+          👋 Thanks for your pull request, @$AUTHOR!
+
+          **What happens next**
+          1. The automatic checks run (an FIH programmer may need to allow them first). They take about 2 minutes.
+          2. If a check turns red, click **Details** next to it to see why. Fix it **on this same branch** and push. This pull request updates itself, so don't open a new one.
+          3. When all checks are green, an FIH programmer reviews your change and merges it, or asks for changes here.
+
+          Questions? Just reply in this conversation. See also the [contributing guide](https://github.com/$OWNER/.github/blob/main/CONTRIBUTING.md)."
+            if [ "$HEAD_REF" = "$HEAD_DEFAULT" ]; then
+              body+="
+
+          💡 **Tip for next time:** this pull request comes from your fork's \`$HEAD_DEFAULT\`. Anything else you push to \`$HEAD_DEFAULT\` will be added to this pull request too. For your next change: **Sync fork**, create a new branch, and open the pull request from that branch."
+            fi
+            if [ -n "$protected_note" ]; then
+              body+="
+
+          $protected_note"
+            fi
+          elif [ -n "$protected_note" ]; then
+            body=$protected_note
+          else
+            echo "Nothing new to say."
+            exit 0
+          fi
+          gh api "repos/$REPO/issues/$PR/comments" -f body="$body" --jq .html_url
+
+      - name: Check for changes to .github/
+        run: |
+          if [ ! -s "$RUNNER_TEMP/changed.txt" ]; then
             echo "No changes under .github/."
             exit 0
           fi
           echo "This pull request changes:"
-          echo "$changed"
+          cat "$RUNNER_TEMP/changed.txt"
           # Only people with write access can push branches to the project itself, so a branch
           # in this repo comes from an FIH maintainer or Dependabot, not from a student's fork.
           if [ "$HEAD_REPO" = "$REPO" ]; then
@@ -46,5 +94,5 @@ jobs:
           fi
           while IFS= read -r path; do
             echo "::error file=$path::This pull request from a fork changes '$path'. Files under .github/ control the checks and the review rules. A maintainer must read this change before clicking 'Approve workflows to run', and this check stays red until the change is removed."
-          done <<< "$changed"
+          done < "$RUNNER_TEMP/changed.txt"
           exit 1

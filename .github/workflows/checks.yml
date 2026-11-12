@@ -76,12 +76,7 @@ jobs:
             echo "python=$python"
             echo "flutter=$flutter"
           } >> "$GITHUB_OUTPUT"
-          {
-            echo "### Project folders found"
-            echo "- Node.js: \`$node\`"
-            echo "- Python: \`$python\`"
-            echo "- Flutter: \`$flutter\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Project folders found: Node.js $node, Python $python, Flutter $flutter"
 
   secrets:
     name: Secrets
@@ -90,12 +85,15 @@ jobs:
       EVENT: ${{ github.event_name }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    outputs:
+      files: ${{ steps.files.outputs.files }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Block key and credential files
+        id: files
         run: |
           if [ "$EVENT" = pull_request ]; then
             files=$(git diff --name-only --diff-filter=AR "$BASE_SHA...$HEAD_SHA")
@@ -103,6 +101,7 @@ jobs:
             files=$(git ls-files)
           fi
           found=0
+          names=()
           while IFS= read -r path; do
             [ -n "$path" ] || continue
             case "$(basename "$path")" in
@@ -110,10 +109,12 @@ jobs:
               .env|.env.*|*.pem|*.key|*.p12|*.pfx|*.jks|*.keystore|id_rsa|id_ed25519|\
               *serviceAccount*.json|*service-account*.json|*.tfstate)
                 echo "::error file=$path::'$path' looks like a key or credential file. Remove it and add it to .gitignore. Share keys with your team another way, never through git."
+                names+=("$path")
                 found=1 ;;
             esac
           done <<< "$files"
           if [ "$found" = 0 ]; then echo "No key or credential files."; fi
+          echo "files=$(printf '%s\n' "${names[@]:0:5}" | jq -Rc 'select(length > 0)' | jq -sc .)" >> "$GITHUB_OUTPUT"
           exit "$found"
 
       - name: Scan for leaked keys and passwords
@@ -138,11 +139,15 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       MAX_MB: ${{ inputs.max-file-size-mb }}
       ALLOW_BUILD: ${{ inputs.allow-build-folders }}
+    outputs:
+      items: ${{ steps.scan.outputs.items }}
+      warned: ${{ steps.scan.outputs.warned }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Block generated folders and large files
+        id: scan
         run: |
           # Pull requests are blocked; on main, files that are already there only produce warnings.
           if [ "$EVENT" = pull_request ]; then
@@ -154,6 +159,7 @@ jobs:
           fi
           max_bytes=$((MAX_MB * 1024 * 1024))
           found=0
+          items=()
           declare -A reported
           while IFS= read -r path; do
             [ -n "$path" ] || continue
@@ -181,14 +187,18 @@ jobs:
             fi
             if [ -n "$reason" ] && [ -z "${reported[$item]:-}" ]; then
               reported[$item]=1
+              items+=("$item")
               echo "::$level file=$item::'$item' should not be in git: $reason. Remove it and add it to .gitignore."
               found=1
             fi
           done <<< "$files"
+          echo "items=$(printf '%s\n' "${items[@]:0:5}" | jq -Rc 'select(length > 0)' | jq -sc .)" >> "$GITHUB_OUTPUT"
           if [ "$found" = 0 ]; then
             echo "Repository is clean."
           elif [ "$level" = error ]; then
             exit 1
+          else
+            echo "warned=true" >> "$GITHUB_OUTPUT"
           fi
 
   code:
@@ -199,11 +209,14 @@ jobs:
       EVENT: ${{ github.event_name }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       BLOCK: ${{ inputs.block-on-code-findings }}
+    outputs:
+      warned: ${{ steps.scan.outputs.warned }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Semgrep
+        id: scan
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           set -- --config p/default --metrics=off --error \
@@ -219,15 +232,19 @@ jobs:
             exit 1
           fi
           echo "::warning::The code scan found a problem (details above)."
+          echo "warned=true" >> "$GITHUB_OUTPUT"
 
   dependencies:
     name: Vulnerable libraries
     runs-on: ubuntu-latest
     env:
       BLOCK: ${{ inputs.block-on-vulnerable-libraries }}
+    outputs:
+      warned: ${{ steps.scan.outputs.warned }}
     steps:
       - uses: actions/checkout@v7
       - name: OSV-Scanner
+        id: scan
         run: |
           curl -sSfL -o /tmp/osv-scanner \
             "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
@@ -245,7 +262,8 @@ jobs:
                 echo "::error::Some dependencies have known vulnerabilities (table above). Update them to a fixed version."
                 exit 1
               fi
-              echo "::warning::Some dependencies have known vulnerabilities (table above). Update them when you can." ;;
+              echo "::warning::Some dependencies have known vulnerabilities (table above). Update them when you can."
+              echo "warned=true" >> "$GITHUB_OUTPUT" ;;
             *) exit "$code" ;;
           esac
 
@@ -355,12 +373,94 @@ jobs:
     needs: [detect, secrets, hygiene, code, dependencies, node, python, flutter]
     runs-on: ubuntu-latest
     steps:
-      - env:
+      - name: Summary
+        env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
         run: |
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          if echo "$NEEDS" | jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' > /dev/null; then
-            echo "::error::Some FIH checks failed. Open the failed check in this list to see why."
+          result() { echo "$NEEDS" | jq -r --arg job "$1" '.[$job].result'; }
+          output() { echo "$NEEDS" | jq -r --arg job "$1" --arg key "$2" '.[$job].outputs[$key] // ""'; }
+          # A JSON list of paths as `a`, `b`
+          as_code() { jq -r '[.[]? | gsub("`"; "") | "`\(.)`"] | join(", ")' <<< "${1:-[]}"; }
+
+          problems=0
+          rows=""
+          # row <check name> <job> <text when passed> <text when failed> [text when warned] [text when skipped]
+          row() {
+            local name=$1 job=$2 icon status text
+            case "$(result "$job")" in
+              success)
+                if [ "$(output "$job" warned)" = true ]; then
+                  icon="⚠️"; status="Warning"; text=$5
+                else
+                  icon="✅"; status="Passed"; text=$3
+                fi ;;
+              failure) icon="❌"; status="**Failed**"; text=$4; problems=$((problems + 1)) ;;
+              cancelled) icon="⏹️"; status="Cancelled"; text="A newer push started the checks again"; problems=$((problems + 1)) ;;
+              *) [ -n "${6:-}" ] || return 0; icon="➖"; status="Not needed"; text=$6 ;;
+            esac
+            rows+="| $name | $icon $status | ${text//|/\\|} |"$'\n'
+          }
+
+          keyfiles=$(as_code "$(output secrets files)")
+          junk=$(as_code "$(output hygiene items)")
+          if [ "$(result detect)" != success ]; then
+            row "Detect project type" detect "" "The checks could not look at the project. Open **Detect project type** to see why"
+          fi
+          row "Secrets" secrets \
+            "No keys or passwords found" \
+            "A key, password or credential was found${keyfiles:+ ($keyfiles)}. Open **Secrets** for the file and line. Deleting it in a new commit is not enough: open a new pull request from a fresh branch without it"
+          row "Clean repository" hygiene \
+            "No generated folders or very large files" \
+            "Should not be in git: ${junk:-generated folders or very large files}. Delete them from your branch and add them to \`.gitignore\`" \
+            "Already in git (warning only): ${junk:-generated folders or very large files}. Remove them when you can"
+          row "Code scan" code \
+            "No risky code patterns found" \
+            "Risky code pattern found. Open **Code scan** for the file, the line and why" \
+            "Risky code pattern found (warning only). Open **Code scan** for details"
+          row "Vulnerable libraries" dependencies \
+            "No libraries with known security bugs" \
+            "A library has a known security bug. Open **Vulnerable libraries** to see which one and the version that fixes it" \
+            "A library has a known security bug (warning only). Open **Vulnerable libraries** to see which one and the version that fixes it"
+          row "Node.js build and tests" node \
+            "The project builds and all tests pass" \
+            "The build or a test failed. Open **Node.js build and tests** for the error, and run the tests on your computer" \
+            "" "No Node.js code in this project"
+          row "Python build and tests" python \
+            "The code compiles and all tests pass" \
+            "The code doesn't compile or a test failed. Open **Python build and tests** for the error, and run the tests on your computer" \
+            "" "No Python code in this project"
+          row "Flutter build and tests" flutter \
+            "The app passes analysis and all tests pass" \
+            "Analysis or a test failed. Open **Flutter build and tests** for the error, and run the tests on your computer" \
+            "" "No Flutter code in this project"
+
+          {
+            if [ "$problems" = 0 ]; then
+              echo "## ✅ FIH checks: all passed"
+            elif [ "$problems" = 1 ]; then
+              echo "## ❌ FIH checks: 1 problem to fix"
+            else
+              echo "## ❌ FIH checks: $problems problems to fix"
+            fi
+            echo
+            echo "| Check | Result | What it means |"
+            echo "|---|---|---|"
+            printf '%s' "$rows"
+            if [ "$problems" != 0 ]; then
+              echo
+              if [ "$EVENT" = pull_request ]; then
+                echo "**How to fix:** push the fix to the same branch. The checks run again automatically."
+                echo "Need help? Comment on the pull request."
+              else
+                echo "**How to fix:** fix it in a pull request; the checks run again on every push."
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$problems" != 0 ] || echo "$NEEDS" | jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' > /dev/null; then
+            echo "::error::Some FIH checks failed. The summary of this run lists what to fix."
             exit 1
           fi
           echo "All FIH checks passed."

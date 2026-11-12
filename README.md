@@ -16,6 +16,10 @@ files, and every pull request (including pull requests from students' forks) is 
 On pull requests, secrets, code and files are checked only in what the pull request adds, so old
 problems in a project don't block students. Pushes to `main` check the whole project.
 
+Each run's **Summary** page has a table of every check, its result and what to do if it's red.
+**FIH guard** also comments on every pull request from a fork, once: what happens next, a tip
+when it comes from the fork's `main`, and a note when it changes `.github/`.
+
 **Protected files** exists because GitHub runs a pull request's own version of the workflow files,
 so a pull request could switch its checks off. That check runs from the project's `main` branch
 instead, before anyone approves the pull request's workflows, and it never runs the pull request's
@@ -62,7 +66,7 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   guard:
